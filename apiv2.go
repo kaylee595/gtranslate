@@ -2,8 +2,8 @@ package gtranslate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -24,8 +24,12 @@ const (
 	defaultNumberOfRetries = 2
 )
 
-func translate(text, from, to string, withVerification bool, tries int, delay time.Duration) (string, error) {
-	if tries == 0 {
+func translate(httpClient *http.Client, text, from, to string, withVerification bool, tries int, delay time.Duration) (string, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	if tries <= 0 {
 		tries = defaultNumberOfRetries
 	}
 
@@ -81,36 +85,34 @@ func translate(text, from, to string, withVerification bool, tries int, delay ti
 	var r *http.Response
 
 	for tries > 0 {
-		r, err = http.Get(u.String())
+		r, err = httpClient.Get(u.String())
 		if err != nil {
-			if err == http.ErrHandlerTimeout {
+			if errors.Is(err, http.ErrHandlerTimeout) {
 				return "", errBadNetwork
 			}
-			return "", err
-		}
-
-		if r.StatusCode == http.StatusOK {
+		} else if r.StatusCode == http.StatusOK {
 			break
 		}
 
-		if r.StatusCode == http.StatusForbidden {
-			tries--
-			time.Sleep(delay)
+		if r.Body != nil {
+			_ = r.Body.Close()
 		}
+		tries--
+		time.Sleep(delay)
 	}
-
-	raw, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		return "", err
+	}
+	defer func() { _ = r.Body.Close() }()
+	if r.StatusCode != http.StatusOK {
+		return "", errStatusCodeNotOK
 	}
 
 	var resp []interface{}
-
-	err = json.Unmarshal([]byte(raw), &resp)
+	err = json.NewDecoder(r.Body).Decode(&resp)
 	if err != nil {
 		return "", err
 	}
-
 	responseText := ""
 	for _, obj := range resp[0].([]interface{}) {
 		if len(obj.([]interface{})) == 0 {
